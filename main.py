@@ -1,11 +1,16 @@
 import uuid
+import nltk
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from cachetools import TTLCache
-import language_tool_python
+from textblob import TextBlob
 
-app = FastAPI()
+# Download required lightweight tokenizers
+nltk.download('punkt', quiet=True)
+nltk.download('punkt_tab', quiet=True)
+
+app = FastAPI(title="Neutral Grammar Engine")
 
 app.add_middleware(
     CORSMiddleware,
@@ -15,9 +20,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Connects via public API — NO Java required on the server
-tool = language_tool_python.LanguageToolPublicAPI('en-US')
-
 # In-memory RAM storage (auto-deletes after 2 hours)
 temp_cache = TTLCache(maxsize=10000, ttl=7200)
 
@@ -26,7 +28,7 @@ class TextPayload(BaseModel):
 
 @app.get("/")
 def root():
-    return {"status": "ok"}
+    return {"status": "running", "engine": "TextBlob Pure-Python"}
 
 @app.post("/fix")
 def fix_text(payload: TextPayload):
@@ -34,8 +36,9 @@ def fix_text(payload: TextPayload):
     if not raw_text:
         raise HTTPException(status_code=400, detail="Empty text")
 
-    # Corrects text without censoring
-    corrected = tool.correct(raw_text)
+    # Native rule & statistical correction (zero censorship / filters)
+    blob = TextBlob(raw_text)
+    corrected = str(blob.correct())
 
     session_id = str(uuid.uuid4())
     temp_cache[session_id] = {"original": raw_text, "corrected": corrected}
