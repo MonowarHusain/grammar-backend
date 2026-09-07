@@ -15,8 +15,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize LanguageTool (downloads rule dictionary automatically)
-tool = language_tool_python.LanguageTool('en-US')
+# Connects via public API — NO Java required on the server
+tool = language_tool_python.LanguageToolPublicAPI('en-US')
 
 # In-memory RAM storage (auto-deletes after 2 hours)
 temp_cache = TTLCache(maxsize=10000, ttl=7200)
@@ -34,7 +34,7 @@ def fix_text(payload: TextPayload):
     if not raw_text:
         raise HTTPException(status_code=400, detail="Empty text")
 
-    # Corrects text with zero censorship
+    # Corrects text without censoring
     corrected = tool.correct(raw_text)
 
     session_id = str(uuid.uuid4())
