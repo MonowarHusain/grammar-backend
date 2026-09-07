@@ -1,13 +1,11 @@
 import uuid
+import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from cachetools import TTLCache
-import spacy
-from symspellpy import SymSpell, Verbosity
-import pkg_resources
 
-app = FastAPI(title="Neutral Grammar Engine")
+app = FastAPI(title="Advanced Uncensored Text Engine")
 
 app.add_middleware(
     CORSMiddleware,
@@ -17,53 +15,72 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 1. Load lightweight English NLP parser (<100MB RAM)
-nlp = spacy.load("en_core_web_sm")
+# High-quality open inference endpoints
+HF_GRAMMAR_URL = "https://api-inference.huggingface.co/models/pszemraj/flan-t5-large-grammar-synthesis"
+HF_PARAPHRASE_URL = "https://api-inference.huggingface.co/models/humarin/chatgpt_paraphraser_on_T5_base"
 
-# 2. Initialize SymSpell engine for context & edit-distance corrections
-sym_spell = SymSpell(max_dictionary_edit_distance=2, prefix_length=7)
-dictionary_path = pkg_resources.resource_filename(
-    "symspellpy", "frequency_dictionary_en_82_765.txt"
-)
-bigram_path = pkg_resources.resource_filename(
-    "symspellpy", "frequency_bigramdictionary_en_243_342.txt"
-)
-sym_spell.load_dictionary(dictionary_path, term_index=0, count_index=1)
-sym_spell.load_bigram_dictionary(bigram_path, term_index=0, count_index=2)
-
-# Temporary RAM cache (auto-deletes entries after 2 hours)
+# Temporary in-memory cache (2-hour TTL)
 temp_cache = TTLCache(maxsize=10000, ttl=7200)
 
-class TextPayload(BaseModel):
+class ProcessPayload(BaseModel):
     text: str
+    mode: str = "grammar"  # "grammar", "paraphrase", or "fluent"
 
 @app.get("/")
 def root():
-    return {"status": "running", "engine": "SymSpell + SpaCy Context Engine"}
+    return {"status": "running", "modes": ["grammar", "paraphrase", "fluent"]}
 
-@app.post("/fix")
-def fix_text(payload: TextPayload):
+async def query_model(url: str, payload: dict) -> str:
+    async with httpx.AsyncClient(timeout=45.0) as client:
+        response = await client.post(url, json=payload)
+        data = response.json()
+        
+        if isinstance(data, dict) and "error" in data:
+            if "loading" in data.get("error", "").lower():
+                raise HTTPException(
+                    status_code=503, 
+                    detail="Model is warming up on cloud GPU. Please retry in 10 seconds."
+                )
+            raise HTTPException(status_code=500, detail=data["error"])
+        
+        if isinstance(data, list) and len(data) > 0:
+            return data[0].get("generated_text", "")
+        return ""
+
+@app.post("/process")
+async def process_text(payload: ProcessPayload):
     raw_text = payload.text.strip()
     if not raw_text:
-        raise HTTPException(status_code=400, detail="Empty text provided")
+        raise HTTPException(status_code=400, detail="Text cannot be empty.")
 
-    # Pass 1: Multi-word bigram and frequency-based spelling/phrase correction
-    suggestions = sym_spell.lookup_compound(raw_text, max_edit_distance=2)
-    corrected_base = suggestions[0].term if suggestions else raw_text
+    try:
+        if payload.mode == "paraphrase":
+            # Paraphrase mode: Rephrases content while maintaining core semantics
+            prompt = f"paraphrase: {raw_text}"
+            corrected = await query_model(
+                HF_PARAPHRASE_URL, 
+                {"inputs": prompt, "parameters": {"max_length": 512, "temperature": 0.7}}
+            )
+        else:
+            # Grammar mode: Pure syntax, tense, spelling, and punctuation correction
+            corrected = await query_model(
+                HF_GRAMMAR_URL, 
+                {"inputs": raw_text, "parameters": {"max_length": 512}}
+            )
 
-    # Pass 2: Sentence capitalization and token boundary cleanup via SpaCy
-    doc = nlp(corrected_base)
-    sentences = []
-    for sent in doc.sents:
-        sent_text = sent.text.strip()
-        if sent_text:
-            # Capitalize first letter of every sentence
-            sent_text = sent_text[0].upper() + sent_text[1:]
-            sentences.append(sent_text)
-    
-    final_text = " ".join(sentences) if sentences else corrected_base
+        if not corrected:
+            corrected = raw_text
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Engine error: {str(e)}")
 
     session_id = str(uuid.uuid4())
-    temp_cache[session_id] = {"original": raw_text, "corrected": final_text}
+    temp_cache[session_id] = {
+        "original": raw_text,
+        "corrected": corrected,
+        "mode": payload.mode
+    }
 
-    return {"session_id": session_id, "corrected": final_text}
+    return {"session_id": session_id, "corrected": corrected, "mode": payload.mode}
